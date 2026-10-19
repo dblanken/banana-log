@@ -1,9 +1,8 @@
 // Daily rollups shared by the dashboard API and the AI's summary call.
+import { round1 } from './util.js';
 import { NUTRIENTS } from './validate.js';
 
 export const MG_PER_MEQ_POTASSIUM = 39.1;
-
-const round1 = (n) => Math.round(n * 10) / 10;
 
 export function rowToEntry(row) {
   const parse = (s, fallback) => {

@@ -1,19 +1,26 @@
 // Timezone helpers built on Intl, so daily totals roll over at local midnight, not UTC.
 
+const formatters = new Map();
+
 function zonedParts(date, timeZone) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    hourCycle: 'h23',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  }).formatToParts(date);
+  let formatter = formatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    formatters.set(timeZone, formatter);
+  }
+  const parts = formatter.formatToParts(date);
   const p = {};
   for (const { type, value } of parts) p[type] = value;
   return p;
 }
 
 // Minutes the zone is ahead of UTC at the given instant (EDT is -240).
-export function offsetMinutes(date, timeZone) {
+function offsetMinutes(date, timeZone) {
   const p = zonedParts(date, timeZone);
   const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
   return Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);

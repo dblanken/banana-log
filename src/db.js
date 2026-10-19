@@ -21,9 +21,12 @@ export async function saveSettings(db, settings) {
   await db.batch(Object.entries(settings).map(([k, v]) => stmt.bind(k, JSON.stringify(v))));
 }
 
-const ENTRY_COLUMNS = `eaten_at, local_date, meal, description, items_json,
-  potassium_mg, calories, protein_g, carbs_g, fat_g, fiber_g, sugar_g, sodium_mg,
-  plate_color_json, food_groups_json, allergens_json, confidence, notes`;
+const ENTRY_COLUMNS = [
+  'eaten_at', 'local_date', 'meal', 'description', 'items_json',
+  'potassium_mg', 'calories', 'protein_g', 'carbs_g', 'fat_g', 'fiber_g', 'sugar_g', 'sodium_mg',
+  'plate_color_json', 'food_groups_json', 'allergens_json', 'confidence', 'notes',
+];
+const placeholders = (n) => Array.from({ length: n }, (_, i) => `?${i + 1}`).join(', ');
 
 function entryValues(e) {
   const t = e.totals;
@@ -37,19 +40,19 @@ function entryValues(e) {
 }
 
 export async function insertEntry(db, entry, { source, createdBy }) {
-  const placeholders = Array.from({ length: 20 }, (_, i) => `?${i + 1}`).join(', ');
+  const columns = [...ENTRY_COLUMNS, 'source', 'created_by'];
   const row = await db
-    .prepare(`INSERT INTO entries (${ENTRY_COLUMNS}, source, created_by) VALUES (${placeholders}) RETURNING *`)
+    .prepare(`INSERT INTO entries (${columns.join(', ')}) VALUES (${placeholders(columns.length)}) RETURNING *`)
     .bind(...entryValues(entry), source, createdBy)
     .first();
   return rowToEntry(row);
 }
 
 export async function updateEntry(db, id, entry) {
-  const sets = ENTRY_COLUMNS.split(',').map((c, i) => `${c.trim()} = ?${i + 1}`).join(', ');
+  const sets = ENTRY_COLUMNS.map((c, i) => `${c} = ?${i + 1}`).join(', ');
   const row = await db
     .prepare(`UPDATE entries SET ${sets}, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-              WHERE id = ?19 AND deleted_at IS NULL RETURNING *`)
+              WHERE id = ?${ENTRY_COLUMNS.length + 1} AND deleted_at IS NULL RETURNING *`)
     .bind(...entryValues(entry), id)
     .first();
   return row ? rowToEntry(row) : null;
@@ -60,10 +63,11 @@ export async function getEntry(db, id) {
   return row ? rowToEntry(row) : null;
 }
 
-export async function listEntries(db, from, to, { deleted = false } = {}) {
+// Live entries only, unless includeDeleted (callers split on entry.deleted_at).
+export async function listEntries(db, from, to, { includeDeleted = false } = {}) {
   const { results } = await db
     .prepare(`SELECT * FROM entries WHERE local_date BETWEEN ?1 AND ?2
-              AND deleted_at IS ${deleted ? 'NOT NULL' : 'NULL'} ORDER BY eaten_at`)
+              ${includeDeleted ? '' : 'AND deleted_at IS NULL'} ORDER BY eaten_at`)
     .bind(from, to)
     .all();
   return results.map(rowToEntry);

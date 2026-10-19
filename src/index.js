@@ -1,6 +1,6 @@
 // Banana Log Worker: one door for the browser (Google sign-in), one for the AI (bearer token).
 import { handleApi, handleIngest } from './api.js';
-import { getSession, handleAuth } from './auth.js';
+import { getSession, handleAuth, isSameOrigin } from './auth.js';
 import { loginPage } from './login.js';
 import { json, withSecurityHeaders } from './util.js';
 
@@ -24,6 +24,10 @@ export default {
 
 async function route(request, env, url) {
   const path = url.pathname;
+  const isWrite = request.method !== 'GET' && request.method !== 'HEAD';
+  if (isWrite && !path.startsWith('/api/ingest/') && !isSameOrigin(request, url)) {
+    return json({ error: 'Cross-site request blocked' }, 403);
+  }
   if (path.startsWith('/auth/')) return handleAuth(request, env, url);
   if (path.startsWith('/api/ingest/')) return handleIngest(request, env, url);
   if (PUBLIC_ASSETS.has(path)) return env.ASSETS.fetch(request);

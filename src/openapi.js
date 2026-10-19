@@ -1,18 +1,15 @@
 // OpenAPI description of the AI door, imported by the custom GPT's Action.
-const nutrient = (description) => ({ type: 'number', minimum: 0, description });
+// Enums and properties come from the validator's lists so the two can't drift apart.
+import { COLOR_KEYS, CONFIDENCE, GROUP_KEYS, MEALS, NUTRIENTS } from './validate.js';
 
-const NUTRIENT_PROPS = {
-  potassium_mg: nutrient('Potassium in milligrams. The most important number.'),
-  calories: nutrient('Calories (kcal)'),
-  protein_g: nutrient('Protein in grams'),
-  carbs_g: nutrient('Carbohydrates in grams'),
-  fat_g: nutrient('Fat in grams'),
-  fiber_g: nutrient('Fiber in grams'),
-  sugar_g: nutrient('Sugar in grams'),
-  sodium_mg: nutrient('Sodium in milligrams'),
-};
+const NUTRIENT_PROPS = Object.fromEntries(Object.keys(NUTRIENTS).map((k) => [k, {
+  type: 'number',
+  minimum: 0,
+  ...(k === 'potassium_mg' ? { description: 'Potassium in milligrams. The most important number.' } : {}),
+}]));
 
 const percent = { type: 'number', minimum: 0, maximum: 100 };
+const percentMap = (keys) => Object.fromEntries(keys.map((k) => [k, percent]));
 
 export function openApiSpec(origin) {
   return {
@@ -67,7 +64,7 @@ export function openApiSpec(origin) {
           required: ['description', 'totals'],
           properties: {
             eaten_at: { type: 'string', description: 'When she ate, ISO 8601 with offset, e.g. 2026-10-19T12:30:00-04:00. Omit for now.' },
-            meal: { type: 'string', enum: ['breakfast', 'lunch', 'dinner', 'snack'] },
+            meal: { type: 'string', enum: MEALS },
             description: { type: 'string', description: 'Short description of the meal', maxLength: 500 },
             items: {
               type: 'array',
@@ -87,15 +84,15 @@ export function openApiSpec(origin) {
             plate_color: {
               type: 'object',
               description: 'Share of the plate by color, percentages adding up to 100',
-              properties: { green: percent, white: percent, red_orange: percent, yellow: percent, brown: percent, other: percent },
+              properties: percentMap(COLOR_KEYS),
             },
             food_groups: {
               type: 'object',
               description: 'Share of the plate by food group, percentages adding up to 100',
-              properties: { vegetables: percent, fruit: percent, grains: percent, protein: percent, dairy: percent, fats_sweets: percent, other: percent },
+              properties: percentMap(GROUP_KEYS),
             },
             allergens: { type: 'array', items: { type: 'string' }, description: 'Allergens present, e.g. seafood, peanuts' },
-            confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+            confidence: { type: 'string', enum: CONFIDENCE },
             notes: { type: 'string', maxLength: 1000 },
           },
         },

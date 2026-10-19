@@ -4,7 +4,7 @@ import {
   redirect, safeEqual, sha256,
 } from './util.js';
 
-export const SESSION_COOKIE = '__Host-bl_session';
+const SESSION_COOKIE = '__Host-bl_session';
 const STATE_COOKIE = '__Host-bl_oauth';
 const SESSION_SECONDS = 30 * 24 * 3600;
 const GOOGLE_AUTH = 'https://accounts.google.com/o/oauth2/v2/auth';
@@ -121,7 +121,6 @@ export async function handleAuth(request, env, url) {
   }
 
   if (url.pathname === '/auth/logout' && request.method === 'POST') {
-    if (!isSameOrigin(request, url)) return new Response('Cross-site request blocked', { status: 403 });
     return redirect('/?signed_out=1', 303, { 'set-cookie': cookie(SESSION_COOKIE, '', { maxAge: 0 }) });
   }
 

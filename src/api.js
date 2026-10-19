@@ -1,13 +1,13 @@
 // JSON API: /api/* for the signed-in web app, /api/ingest/* for the AI's bearer token.
-import { isSameOrigin } from './auth.js';
+// Cross-site writes are rejected in index.js before either handler runs.
 import {
   deleteLab, getEntry, insertEntry, insertLab, listEntries, listLabs, loadSettings,
   recentAiEntryCount, saveSettings, setDeleted, updateEntry,
 } from './db.js';
 import { openApiSpec } from './openapi.js';
-import { aggregate, daySummary } from './summary.js';
+import { MG_PER_MEQ_POTASSIUM, aggregate, daySummary, potassiumStatus } from './summary.js';
 import { localDate } from './time.js';
-import { addDays, csvCell, isIsoDate, json, safeEqual } from './util.js';
+import { addDays, csvCell, isIsoDate, json, round1, safeEqual } from './util.js';
 import {
   NUTRIENTS, ValidationError, normalizeEntry, normalizeLab, normalizeSettings,
 } from './validate.js';
@@ -15,12 +15,13 @@ import {
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_RANGE_DAYS = 400;
 const AI_ENTRIES_PER_MINUTE = 20;
+// Fields a PATCH may change; everything else (id, source, timestamps) stays as stored.
+const EDITABLE = ['description', 'meal', 'eaten_at', 'notes', 'confidence', 'plate_color', 'food_groups', 'items', 'allergens'];
 
 class HttpError extends Error {
-  constructor(status, message, extra = {}) {
+  constructor(status, message) {
     super(message);
     this.status = status;
-    this.extra = extra;
   }
 }
 
@@ -42,7 +43,7 @@ function wrap(handler) {
       return await handler(...args);
     } catch (err) {
       if (err instanceof ValidationError) return json({ error: 'Validation failed', details: err.errors }, 422);
-      if (err instanceof HttpError) return json({ error: err.message, ...err.extra }, err.status);
+      if (err instanceof HttpError) return json({ error: err.message }, err.status);
       throw err;
     }
   };
@@ -63,9 +64,9 @@ function dateParam(url, name, fallback) {
   return v;
 }
 
-function rangeParams(url, settings) {
+function rangeParams(url, settings, { defaultDays = 1 } = {}) {
   const to = dateParam(url, 'to', today(settings));
-  const from = dateParam(url, 'from', to);
+  const from = dateParam(url, 'from', addDays(to, 1 - defaultDays));
   if (from > to) throw new HttpError(400, 'from must be on or before to');
   if (from < addDays(to, -MAX_RANGE_DAYS)) throw new HttpError(400, `Ranges are limited to ${MAX_RANGE_DAYS} days`);
   return { from, to };
@@ -89,24 +90,23 @@ export const handleIngest = wrap(async (request, env, url) => {
   }
   if (!env.INGEST_TOKEN) return json({ error: 'Logging from the AI is not set up yet' }, 503);
   const auth = request.headers.get('authorization') || '';
-  const token = auth.replace(/^Bearer\s+/i, '');
-  if (!auth.match(/^Bearer\s+/i) || !(await safeEqual(token, env.INGEST_TOKEN))) {
+  const match = auth.match(/^Bearer\s+(.+)$/i);
+  if (!match || !(await safeEqual(match[1], env.INGEST_TOKEN))) {
     return json({ error: 'Missing or wrong API key' }, 401, { 'www-authenticate': 'Bearer' });
   }
 
-  const settings = await loadSettings(env.DB);
-
   if (url.pathname === '/api/ingest/entries' && request.method === 'POST') {
-    if ((await recentAiEntryCount(env.DB)) >= AI_ENTRIES_PER_MINUTE) {
+    const [settings, recent] = await Promise.all([loadSettings(env.DB), recentAiEntryCount(env.DB)]);
+    if (recent >= AI_ENTRIES_PER_MINUTE) {
       return json({ error: 'Too many entries in the last minute. Try again shortly.' }, 429);
     }
-    const body = await readJson(request);
-    const { entry, warnings } = normalizeEntry(body, entryOptions(settings));
+    const { entry, warnings } = normalizeEntry(await readJson(request), entryOptions(settings));
     const saved = await insertEntry(env.DB, entry, { source: 'ai', createdBy: 'ai' });
     return json({ entry: saved, warnings, today: await summaryFor(env, saved.local_date, settings) }, 201);
   }
 
   if (url.pathname === '/api/ingest/summary' && request.method === 'GET') {
+    const settings = await loadSettings(env.DB);
     return json(await summaryFor(env, dateParam(url, 'date', today(settings)), settings));
   }
 
@@ -118,54 +118,54 @@ export const handleIngest = wrap(async (request, env, url) => {
 export const handleApi = wrap(async (request, env, url, session) => {
   const { method } = request;
   const path = url.pathname;
-  if (method !== 'GET' && method !== 'HEAD' && !isSameOrigin(request, url)) {
-    return json({ error: 'Cross-site request blocked' }, 403);
-  }
-  const settings = await loadSettings(env.DB);
+  let cachedSettings;
+  const settings = async () => (cachedSettings ??= await loadSettings(env.DB));
   let m;
 
   if (path === '/api/me' && method === 'GET') {
-    return json({ email: session.email, today: today(settings), settings });
+    return json({ email: session.email, settings: await settings() });
   }
 
   if (path === '/api/settings') {
-    if (method === 'GET') return json(settings);
+    if (method === 'GET') return json(await settings());
     if (method === 'PUT') {
-      const next = normalizeSettings(await readJson(request), settings);
+      const next = normalizeSettings(await readJson(request), await settings());
       await saveSettings(env.DB, next);
       return json(next);
     }
   }
 
-  if (path === '/api/summary' && method === 'GET') {
-    return json(await summaryFor(env, dateParam(url, 'date', today(settings)), settings));
+  // Everything the Today view needs in one round trip.
+  if (path === '/api/day' && method === 'GET') {
+    const st = await settings();
+    const date = dateParam(url, 'date', today(st));
+    const all = await listEntries(env.DB, date, date, { includeDeleted: true });
+    const live = all.filter((e) => !e.deleted_at);
+    return json({ summary: daySummary(date, live, st), entries: live, deleted: all.filter((e) => e.deleted_at) });
   }
 
   if (path === '/api/days' && method === 'GET') {
-    const { from, to } = rangeParams(url, settings);
+    const st = await settings();
+    const { from, to } = rangeParams(url, st);
     const byDate = new Map();
     for (const e of await listEntries(env.DB, from, to)) {
       if (!byDate.has(e.local_date)) byDate.set(e.local_date, []);
       byDate.get(e.local_date).push(e);
     }
-    const days = [...byDate].map(([date, entries]) => ({ date, ...aggregate(entries) }));
-    return json({ from, to, settings, days });
+    const days = [...byDate].map(([date, entries]) => {
+      const agg = aggregate(entries);
+      return { date, ...agg, potassium: potassiumStatus(agg.totals.potassium_mg, st) };
+    });
+    return json({ from, to, settings: st, days });
   }
 
-  if (path === '/api/entries') {
-    if (method === 'GET') {
-      const { from, to } = rangeParams(url, settings);
-      const deleted = url.searchParams.get('deleted') === '1';
-      return json({ entries: await listEntries(env.DB, from, to, { deleted }) });
-    }
-    if (method === 'POST') {
-      const body = await readJson(request);
-      const source = url.searchParams.get('source') === 'paste' ? 'paste' : 'manual';
-      const { entry, warnings } = normalizeEntry(body, entryOptions(settings));
-      if (url.searchParams.get('dry_run') === '1') return json({ entry, warnings });
-      const saved = await insertEntry(env.DB, entry, { source, createdBy: session.email });
-      return json({ entry: saved, warnings }, 201);
-    }
+  if (path === '/api/entries' && method === 'POST') {
+    const body = await readJson(request);
+    const source = url.searchParams.get('source') === 'paste' ? 'paste' : 'manual';
+    const { entry, warnings } = normalizeEntry(body, entryOptions(await settings()));
+    if (url.searchParams.get('dry_run') === '1') return json({ entry, warnings });
+    const saved = await insertEntry(env.DB, entry, { source, createdBy: session.email });
+    return json({ entry: saved, warnings }, 201);
   }
 
   if ((m = path.match(/^\/api\/entries\/(\d+)$/))) {
@@ -174,25 +174,10 @@ export const handleApi = wrap(async (request, env, url, session) => {
       const existing = await getEntry(env.DB, id);
       if (!existing || existing.deleted_at) throw new HttpError(404, 'Entry not found');
       const patch = await readJson(request);
-      const merged = {
-        description: existing.description,
-        meal: existing.meal,
-        eaten_at: existing.eaten_at,
-        notes: existing.notes,
-        confidence: existing.confidence,
-        items: existing.items,
-        plate_color: existing.plate_color,
-        food_groups: existing.food_groups,
-        allergens: existing.allergens,
-        totals: { ...existing.totals },
-      };
-      for (const k of ['description', 'meal', 'eaten_at', 'notes', 'confidence', 'plate_color', 'food_groups', 'items', 'allergens']) {
-        if (patch[k] !== undefined) merged[k] = patch[k];
-      }
-      if (patch.totals && typeof patch.totals === 'object') {
-        for (const k of Object.keys(NUTRIENTS)) if (patch.totals[k] !== undefined) merged.totals[k] = patch.totals[k];
-      }
-      const { entry, warnings } = normalizeEntry(merged, entryOptions(settings));
+      const merged = { ...existing, totals: { ...existing.totals } };
+      for (const k of EDITABLE) if (patch[k] !== undefined) merged[k] = patch[k];
+      for (const k of Object.keys(NUTRIENTS)) if (patch.totals?.[k] !== undefined) merged.totals[k] = patch.totals[k];
+      const { entry, warnings } = normalizeEntry(merged, entryOptions(await settings()));
       const saved = await updateEntry(env.DB, id, entry);
       if (!saved) throw new HttpError(404, 'Entry not found');
       return json({ entry: saved, warnings });
@@ -213,7 +198,7 @@ export const handleApi = wrap(async (request, env, url, session) => {
   if (path === '/api/labs') {
     if (method === 'GET') return json({ labs: await listLabs(env.DB) });
     if (method === 'POST') {
-      const lab = normalizeLab(await readJson(request), { timeZone: settings.timezone });
+      const lab = normalizeLab(await readJson(request), { timeZone: (await settings()).timezone });
       return json({ lab: await insertLab(env.DB, lab, session.email) }, 201);
     }
   }
@@ -224,9 +209,7 @@ export const handleApi = wrap(async (request, env, url, session) => {
   }
 
   if (path === '/api/export.csv' && method === 'GET') {
-    const to = dateParam(url, 'to', today(settings));
-    const from = dateParam(url, 'from', addDays(to, -MAX_RANGE_DAYS));
-    if (from > to || from < addDays(to, -MAX_RANGE_DAYS)) throw new HttpError(400, `Pick a range of up to ${MAX_RANGE_DAYS} days`);
+    const { from, to } = rangeParams(url, await settings(), { defaultDays: MAX_RANGE_DAYS + 1 });
     const entries = await listEntries(env.DB, from, to);
     const nutrientKeys = Object.keys(NUTRIENTS);
     const header = ['date', 'eaten_at', 'meal', 'description', ...nutrientKeys, 'potassium_meq', 'allergens', 'confidence', 'source', 'notes'];
@@ -235,7 +218,7 @@ export const handleApi = wrap(async (request, env, url, session) => {
       lines.push([
         e.local_date, e.eaten_at, e.meal, e.description,
         ...nutrientKeys.map((k) => e.totals[k]),
-        e.totals.potassium_mg === null ? '' : Math.round((e.totals.potassium_mg / 39.1) * 10) / 10,
+        round1(e.totals.potassium_mg / MG_PER_MEQ_POTASSIUM),
         e.allergens.join('; '), e.confidence, e.source, e.notes,
       ].map(csvCell).join(','));
     }

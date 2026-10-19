@@ -2,6 +2,8 @@
 
 const encoder = new TextEncoder();
 
+export const round1 = (n) => Math.round(n * 10) / 10;
+
 export function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), {
     status,
@@ -62,8 +64,8 @@ export function parseCookies(header) {
   return out;
 }
 
-export function cookie(name, value, { maxAge, sameSite = 'Lax' } = {}) {
-  let c = `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=${sameSite}`;
+export function cookie(name, value, { maxAge } = {}) {
+  let c = `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=Lax`;
   if (maxAge !== undefined) c += `; Max-Age=${maxAge}`;
   return c;
 }

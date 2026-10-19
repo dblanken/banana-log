@@ -13,6 +13,7 @@ const NUTRIENTS = [
   ['sugar_g', 'Sugar', 'g', null],
   ['sodium_mg', 'Sodium', 'mg', 'sodium_limit_mg'],
 ];
+const TARGETS = NUTRIENTS.filter((n) => n[3]);
 const PLATE = {
   color: {
     title: 'By color',
@@ -44,12 +45,18 @@ const state = {
 
 const view = document.getElementById('view');
 
-// replaceChildren() would print "null" for skipped optional sections, so drop them first.
-function fill(el, ...children) {
-  el.replaceChildren(...children.flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false));
+// ---------- DOM helpers ----------
+
+// Flattens nested lists and drops null/undefined/false, so optional sections can be written inline.
+function kids(children) {
+  return children.flat(Infinity)
+    .filter((c) => c !== null && c !== undefined && c !== false)
+    .map((c) => (c instanceof Node ? c : String(c)));
 }
 
-// ---------- DOM helpers ----------
+function fill(el, ...children) {
+  el.replaceChildren(...kids(children));
+}
 
 function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
@@ -60,10 +67,7 @@ function h(tag, attrs, ...children) {
     else if (k === 'value') el.value = v;
     else el.setAttribute(k, v === true ? '' : v);
   }
-  for (const c of children.flat(Infinity)) {
-    if (c === null || c === undefined || c === false) continue;
-    el.append(c instanceof Node ? c : String(c));
-  }
+  el.append(...kids(children));
   return el;
 }
 
@@ -71,7 +75,7 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 function s(tag, attrs, ...children) {
   const el = document.createElementNS(SVG_NS, tag);
   for (const [k, v] of Object.entries(attrs || {})) if (v !== null && v !== undefined) el.setAttribute(k, v);
-  for (const c of children.flat()) if (c !== null && c !== undefined) el.append(c instanceof Node ? c : String(c));
+  el.append(...kids(children));
   return el;
 }
 
@@ -82,12 +86,26 @@ function fmt(n, digits = 0) {
   return Number(n).toLocaleString('en-US', { maximumFractionDigits: digits, minimumFractionDigits: digits });
 }
 
-function todayLocal() {
-  return localDateOf(new Date());
+// Building an Intl formatter is the slow part, so keep one per (kind, timezone).
+const formatters = new Map();
+function formatter(kind, options) {
+  const key = `${kind}|${state.settings.timezone}`;
+  if (!formatters.has(key)) formatters.set(key, new Intl.DateTimeFormat('en-US', { timeZone: state.settings.timezone, ...options }));
+  return formatters.get(key);
 }
 
-function localDateOf(date) {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: state.settings.timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+function zonedParts(date) {
+  const p = {};
+  const parts = formatter('parts', {
+    hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  }).formatToParts(date);
+  for (const { type, value } of parts) p[type] = value;
+  return p;
+}
+
+function todayLocal() {
+  const p = zonedParts(new Date());
+  return `${p.year}-${p.month}-${p.day}`;
 }
 
 function addDays(iso, n) {
@@ -101,17 +119,12 @@ function fmtDay(iso, opts = { weekday: 'short', month: 'short', day: 'numeric' }
 }
 
 function fmtTime(isoInstant) {
-  return new Intl.DateTimeFormat('en-US', { timeZone: state.settings.timezone, hour: 'numeric', minute: '2-digit' }).format(new Date(isoInstant));
+  return formatter('time', { hour: 'numeric', minute: '2-digit' }).format(new Date(isoInstant));
 }
 
 // "YYYY-MM-DDTHH:MM" in her timezone, for <input type="datetime-local">.
 function localInputValue(date) {
-  const p = {};
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: state.settings.timezone, hourCycle: 'h23',
-    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-  }).formatToParts(date);
-  for (const { type, value } of parts) p[type] = value;
+  const p = zonedParts(date);
   return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
 }
 
@@ -144,7 +157,7 @@ async function api(path, { method = 'GET', body } = {}) {
 let toastTimer;
 function toast(message, action) {
   const el = document.getElementById('toast');
-  el.replaceChildren(h('span', null, message));
+  fill(el, h('span', null, message));
   if (action) {
     el.append(h('button', {
       type: 'button',
@@ -193,21 +206,16 @@ async function renderToday() {
   const today = todayLocal();
   if (!state.date || state.date > today) state.date = today;
   const date = state.date;
-  const q = `from=${date}&to=${date}`;
-  const [summary, live, deleted] = await Promise.all([
-    api(`/api/summary?date=${date}`),
-    api(`/api/entries?${q}`),
-    api(`/api/entries?${q}&deleted=1`),
-  ]);
+  const { summary, entries, deleted } = await api(`/api/day?date=${date}`);
   if (currentView() !== 'today' || state.date !== date) return;
-  fill(view, 
+  fill(view,
     dateNav(date, today),
     potassiumCard(summary),
     summary.allergens.length ? allergenAlert(summary.allergens) : null,
     nutrientCard(summary),
     plateCard(summary),
-    mealsSection(live.entries),
-    deleted.entries.length ? deletedSection(deleted.entries) : null,
+    mealsSection(entries),
+    deleted.length ? deletedSection(deleted) : null,
   );
 }
 
@@ -240,8 +248,8 @@ function potassiumCard(summary) {
   } else {
     status = h('p', { class: 'k-status' }, `${fmt(k.remaining_mg)} mg to go to reach ${fmt(k.target_mg)} mg`);
   }
-  const fill = h('div', { class: `fill ${fillClass}` });
-  fill.style.width = `${Math.min(100, Math.round(ratio * 100))}%`;
+  const bar = h('div', { class: `fill ${fillClass}` });
+  bar.style.width = `${Math.min(100, Math.round(ratio * 100))}%`;
   const supplementMg = k.supplement_meq * MG_PER_MEQ;
   return h('section', { class: 'card k-card', 'aria-label': 'Potassium' },
     h('div', { class: 'card-head' },
@@ -253,7 +261,7 @@ function potassiumCard(summary) {
     h('div', {
       class: 'meter', role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': k.target_mg, 'aria-valuenow': k.food_mg,
       'aria-label': 'Potassium from food compared with target',
-    }, fill),
+    }, bar),
     status,
     k.supplement_meq
       ? h('p', { class: 'small muted' }, `Plus the ${fmt(k.supplement_meq)} mEq supplement (${fmt(supplementMg)} mg), for ${fmt(k.total_meq, 1)} mEq total today.`)
@@ -343,7 +351,8 @@ function mealsSection(entries) {
   );
 }
 
-function mealCard(e) {
+// `preview` (a status label) shows a not-yet-saved or just-saved paste without edit controls.
+function mealCard(e, { preview = null, warnings = [] } = {}) {
   const t = e.totals;
   const macro = [
     t.calories !== null ? `${fmt(t.calories)} kcal` : null,
@@ -353,9 +362,11 @@ function mealCard(e) {
   ].filter(Boolean);
   return h('article', { class: 'meal' },
     h('div', { class: 'meal-top' },
+      preview ? h('span', { class: 'pill good' }, preview) : null,
+      preview ? h('span', null, fmtDay(e.local_date)) : null,
       h('span', { class: 'num' }, fmtTime(e.eaten_at)),
       h('span', { class: 'pill meal-type' }, cap(e.meal)),
-      h('span', null, SOURCE_LABELS[e.source] || e.source),
+      e.source ? h('span', null, SOURCE_LABELS[e.source] || e.source) : null,
       e.confidence ? h('span', { class: `pill ${e.confidence === 'low' ? 'low' : ''}` }, `${cap(e.confidence)} confidence`) : null),
     h('p', { class: 'meal-desc' }, e.description),
     h('div', { class: 'meal-nums' },
@@ -368,30 +379,40 @@ function mealCard(e) {
         h('span', null, it.portion ? `${it.name} (${it.portion})` : it.name),
         h('span', null, it.potassium_mg !== undefined ? `${fmt(it.potassium_mg)} mg K` : ''))))) : null,
     e.notes ? h('p', { class: 'small muted' }, e.notes) : null,
-    mealActions(e),
+    warnings.length ? h('ul', { class: 'warnings' }, warnings.map((w) => h('li', null, w))) : null,
+    preview ? null : mealActions(e),
   );
 }
 
-function mealActions(entry) {
+// A Delete button that asks once inline (the viewer has no confirm() dialog) before calling onDelete.
+function deleteControls(question, onDelete, extra = []) {
   const box = h('div', { class: 'actions' });
-  const normal = () => box.replaceChildren(
-    h('button', { class: 'btn', type: 'button', onclick: () => openEditor(entry) }, 'Edit'),
-    h('button', { class: 'btn ghost danger', type: 'button', onclick: confirm }, 'Delete'));
-  const confirm = () => box.replaceChildren(
-    h('span', { class: 'confirm-text' }, 'Delete this meal?'),
-    h('button', { class: 'btn danger', type: 'button', onclick: remove }, 'Delete'),
+  const normal = () => fill(box, extra, h('button', { class: 'btn ghost danger', type: 'button', onclick: ask }, 'Delete'));
+  const ask = () => fill(box,
+    h('span', { class: 'confirm-text' }, question),
+    h('button', {
+      class: 'btn danger',
+      type: 'button',
+      onclick: async () => {
+        try {
+          await onDelete();
+          render();
+        } catch (err) {
+          toast(err.message);
+          normal();
+        }
+      },
+    }, 'Delete'),
     h('button', { class: 'btn ghost', type: 'button', onclick: normal }, 'Keep'));
-  const remove = async () => {
-    try {
-      await api(`/api/entries/${entry.id}`, { method: 'DELETE' });
-      toast('Meal deleted', { label: 'Undo', run: () => restore(entry.id) });
-      render();
-    } catch (err) {
-      toast(err.message);
-    }
-  };
   normal();
   return box;
+}
+
+function mealActions(entry) {
+  return deleteControls('Delete this meal?', async () => {
+    await api(`/api/entries/${entry.id}`, { method: 'DELETE' });
+    toast('Meal deleted', { label: 'Undo', run: () => restore(entry.id) });
+  }, [h('button', { class: 'btn', type: 'button', onclick: () => openEditor(entry) }, 'Edit')]);
 }
 
 async function restore(id) {
@@ -482,10 +503,10 @@ function openEditor(entry) {
       toast(res.warnings.length ? `Saved. ${res.warnings[0]}` : 'Changes saved');
       render();
     } catch (err) {
-      errorBox.replaceChildren(errorList(err));
+      fill(errorBox, errorList(err));
     }
   });
-  dialog.replaceChildren(h('div', { class: 'dialog-body' }, h('h2', { id: 'dialog-title' }, 'Edit meal'), form));
+  fill(dialog, h('div', { class: 'dialog-body' }, h('h2', { id: 'dialog-title' }, 'Edit meal'), form));
   dialog.showModal();
 }
 
@@ -498,7 +519,7 @@ function niceMax(v) {
   return 10 * mag;
 }
 
-function barChart(dates, values, { target, mode, label }) {
+function barChart(dates, values, { target, mode, met, label }) {
   const W = 640;
   const H = 230;
   const m = { l: 46, r: 8, t: 14, b: 26 };
@@ -517,8 +538,8 @@ function barChart(dates, values, { target, mode, label }) {
     const v = values[i];
     if (v === null) return;
     let cls = 'bar';
-    if (target && mode === 'goal' && v >= target) cls += ' met';
-    if (target && mode === 'limit' && v > target) cls += ' over';
+    if (mode === 'goal' && met[i]) cls += ' met';
+    if (mode === 'limit' && !met[i]) cls += ' over';
     const rect = s('rect', { class: cls, x: m.l + i * slot + (slot - bw) / 2, y: y(v), width: bw, height: Math.max(1, m.t + ih - y(v)), rx: Math.min(3, bw / 3) },
       s('title', null, `${fmtDay(d)}: ${fmt(v)} mg`));
     svg.append(rect);
@@ -580,7 +601,8 @@ async function renderHistory() {
     return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
   };
   const target = settings.potassium_target_mg;
-  const metDays = logged.filter((d) => (settings.potassium_mode === 'limit' ? d.totals.potassium_mg <= target : d.totals.potassium_mg >= target)).length;
+  const metDays = logged.filter((d) => d.potassium.met).length;
+  const met = dates.map((d) => byDate.get(d)?.potassium.met);
 
   const rangeButtons = h('div', { class: 'segmented', role: 'group', 'aria-label': 'Range' },
     [7, 30, 90].map((n) => h('button', {
@@ -596,7 +618,7 @@ async function renderHistory() {
     plateLegend(null, state.plateMode));
   drawPlate();
 
-  fill(view, 
+  fill(view,
     h('div', { class: 'card-head' }, h('h1', null, 'History'), rangeButtons),
     h('div', { class: 'stats' },
       stat(fmt(avg('potassium_mg')), 'avg mg potassium / logged day'),
@@ -605,7 +627,7 @@ async function renderHistory() {
       stat(`${logged.length} of ${dates.length}`, 'days with meals logged')),
     h('section', { class: 'card', 'aria-label': 'Daily potassium' },
       h('span', { class: 'eyebrow' }, 'Potassium from food, mg per day'),
-      barChart(dates, kValues, { target, mode: settings.potassium_mode, label: `Daily potassium for the last ${state.historyDays} days` }),
+      barChart(dates, kValues, { target, mode: settings.potassium_mode, met, label: `Daily potassium for the last ${state.historyDays} days` }),
       h('p', { class: 'small muted' }, `Does not include the ${fmt(settings.supplement_meq_daily)} mEq supplement. Days with no bar have nothing logged.`)),
     plateCard_,
   );
@@ -637,28 +659,21 @@ function renderAdd() {
   }, state.pasteDraft);
 
   async function runPaste(save) {
-    pasteOut.replaceChildren();
+    fill(pasteOut);
     let meals;
     try {
       const parsed = extractJson(pasteArea.value);
       meals = Array.isArray(parsed) ? parsed : [parsed];
       if (!meals.length || meals.length > 10) throw new Error('Paste between 1 and 10 meals at a time.');
     } catch (err) {
-      pasteOut.replaceChildren(errorList(err));
+      fill(pasteOut, errorList(err));
       return;
     }
     const results = await Promise.all(meals.map((meal) =>
       api(`/api/entries?source=paste${save ? '' : '&dry_run=1'}`, { method: 'POST', body: meal })
         .then((r) => ({ ok: true, ...r }), (err) => ({ ok: false, err }))));
-    pasteOut.replaceChildren(...results.map((r, i) => (r.ok
-      ? h('article', { class: 'meal' },
-        h('div', { class: 'meal-top' }, h('span', { class: 'pill good' }, save ? 'Saved' : 'Looks good'),
-          h('span', null, `${fmtDay(r.entry.local_date)} · ${cap(r.entry.meal)}`)),
-        h('p', { class: 'meal-desc' }, r.entry.description),
-        h('div', { class: 'meal-nums' }, h('span', { class: 'k' }, `${fmt(r.entry.totals.potassium_mg)} mg potassium`),
-          r.entry.totals.calories !== null ? h('span', null, `${fmt(r.entry.totals.calories)} kcal`) : null),
-        r.entry.allergens.length ? h('div', { class: 'alert inline' }, `Contains ${r.entry.allergens.join(', ')}`) : null,
-        r.warnings.length ? h('ul', { class: 'warnings' }, r.warnings.map((w) => h('li', null, w))) : null)
+    fill(pasteOut, results.map((r, i) => (r.ok
+      ? mealCard(r.entry, { preview: save ? 'Saved' : 'Looks good', warnings: r.warnings })
       : h('article', { class: 'meal' }, h('p', { class: 'meal-desc' }, `Meal ${i + 1} wasn't saved`), errorList(r.err)))));
     if (save && results.every((r) => r.ok)) {
       state.pasteDraft = '';
@@ -684,7 +699,7 @@ function renderAdd() {
   quick.elements['qa-meal'].prepend(h('option', { value: '', selected: true }, 'Guess from time'));
   quick.addEventListener('submit', async (ev) => {
     ev.preventDefault();
-    quickErrors.replaceChildren();
+    fill(quickErrors);
     try {
       const res = await api('/api/entries?source=manual', {
         method: 'POST',
@@ -699,11 +714,11 @@ function renderAdd() {
       toast('Meal added');
       location.hash = '#today';
     } catch (err) {
-      quickErrors.replaceChildren(errorList(err));
+      fill(quickErrors, errorList(err));
     }
   });
 
-  fill(view, 
+  fill(view,
     h('h1', null, 'Add a meal'),
     h('section', { class: 'card' },
       h('h2', null, 'Paste from ChatGPT'),
@@ -782,19 +797,17 @@ async function renderLabs() {
       toast('Lab result saved');
       render();
     } catch (err) {
-      errors.replaceChildren(errorList(err));
+      fill(errors, errorList(err));
     }
   });
 
   const list = labs.length
     ? h('div', { class: 'lab-list' }, labs.map((lab) => {
       const [cls, label] = labClass(lab.potassium_mmol);
-      const actions = h('span');
-      const normal = () => actions.replaceChildren(h('button', { class: 'btn ghost danger', type: 'button', onclick: ask }, 'Delete'));
-      const ask = () => actions.replaceChildren(
-        h('button', { class: 'btn danger', type: 'button', onclick: async () => { await api(`/api/labs/${lab.id}`, { method: 'DELETE' }); toast('Lab result deleted'); render(); } }, 'Delete'),
-        h('button', { class: 'btn ghost', type: 'button', onclick: normal }, 'Keep'));
-      normal();
+      const actions = deleteControls('Delete?', async () => {
+        await api(`/api/labs/${lab.id}`, { method: 'DELETE' });
+        toast('Lab result deleted');
+      });
       return h('div', { class: 'lab' },
         h('span', { class: 'num' }, fmtDay(lab.taken_on, { month: 'short', day: 'numeric', year: 'numeric' })),
         h('span', { class: 'val' }, `${lab.potassium_mmol.toFixed(1)}`),
@@ -804,7 +817,7 @@ async function renderLabs() {
     }))
     : h('div', { class: 'empty' }, 'No lab results yet. Add her most recent potassium level above.');
 
-  fill(view, 
+  fill(view,
     h('h1', null, 'Lab results'),
     h('section', { class: 'card' }, h('h2', null, 'Add a result'), form),
     labs.length >= 2 ? h('section', { class: 'card' }, h('span', { class: 'eyebrow' }, 'Serum potassium, mmol/L'), labChart(labs)) : null,
@@ -840,12 +853,8 @@ function renderSettings() {
         h('span', { class: 'hint' }, 'Shown alongside food; not counted toward the food target.'))),
     h('p', { class: 'small muted' }, 'Optional daily targets. Leave blank to hide them.'),
     h('div', { class: 'grid2' },
-      numberField('set-calorie_target', 'Calories (kcal)', st.calorie_target),
-      numberField('set-protein_target_g', 'Protein (g)', st.protein_target_g),
-      numberField('set-carbs_target_g', 'Carbs (g)', st.carbs_target_g),
-      numberField('set-fat_target_g', 'Fat (g)', st.fat_target_g),
-      numberField('set-fiber_target_g', 'Fiber (g)', st.fiber_target_g),
-      numberField('set-sodium_limit_mg', 'Sodium limit (mg)', st.sodium_limit_mg)),
+      TARGETS.map(([, label, unit, key]) =>
+        numberField(`set-${key}`, `${label}${key === 'sodium_limit_mg' ? ' limit' : ''} (${unit})`, st[key]))),
     h('fieldset', { class: 'field' },
       h('legend', { class: 'label' }, 'Allergies to watch for'),
       h('span', { class: 'hint' }, 'Meals whose food names mention these get a warning, even if ChatGPT misses it.'),
@@ -861,9 +870,9 @@ function renderSettings() {
   updateHint();
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
-    errors.replaceChildren();
-    const optional = (name) => {
-      const v = form.elements[`set-${name}`].value.trim();
+    fill(errors);
+    const optional = (key) => {
+      const v = form.elements[`set-${key}`].value.trim();
       return v === '' ? null : Number(v);
     };
     try {
@@ -873,19 +882,14 @@ function renderSettings() {
           potassium_mode: form.elements['set-mode'].value,
           potassium_target_mg: Number(form.elements['set-target'].value),
           supplement_meq_daily: Number(form.elements['set-supp'].value),
-          calorie_target: optional('calorie_target'),
-          protein_target_g: optional('protein_target_g'),
-          carbs_target_g: optional('carbs_target_g'),
-          fat_target_g: optional('fat_target_g'),
-          fiber_target_g: optional('fiber_target_g'),
-          sodium_limit_mg: optional('sodium_limit_mg'),
+          ...Object.fromEntries(TARGETS.map(([, , , key]) => [key, optional(key)])),
           timezone: form.elements['set-tz'].value.trim(),
           allergens_watch: [...form.querySelectorAll('input[name="set-allergens"]:checked')].map((el) => el.value),
         },
       });
       toast('Settings saved');
     } catch (err) {
-      errors.replaceChildren(errorList(err));
+      fill(errors, errorList(err));
     }
   });
 
@@ -903,7 +907,7 @@ function renderSettings() {
     },
   }, 'Copy');
 
-  fill(view, 
+  fill(view,
     h('h1', null, 'Settings'),
     h('section', { class: 'card' }, h('h2', null, 'Targets'),
       h('p', { class: 'notice' }, 'The potassium target starts at a general placeholder (2,600 mg/day, the adequate intake for adult women). Replace it with the number her doctor or dietitian gives you.'),

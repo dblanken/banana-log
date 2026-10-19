@@ -1,5 +1,6 @@
 // Turns untrusted input (from the AI, a paste, or a form) into clean records.
 import { zonedToUtc, localDate, localHour, isValidTimeZone } from './time.js';
+import { isIsoDate, round1 } from './util.js';
 
 export const NUTRIENTS = {
   potassium_mg: 20000,
@@ -49,8 +50,6 @@ export class ValidationError extends Error {
   }
 }
 
-const round1 = (n) => Math.round(n * 10) / 10;
-
 function num(value, field, max, errors) {
   if (value === undefined || value === null || value === '') return null;
   const n = typeof value === 'string' ? Number(value.trim()) : value;
@@ -87,7 +86,7 @@ const ISO_RE = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?
 
 // Accepts "2026-10-19T12:30:00-04:00", "...Z", or a bare local time ("2026-10-19T12:30"),
 // which is read in the configured timezone.
-export function parseEatenAt(value, timeZone, now, errors) {
+function parseEatenAt(value, timeZone, now, errors) {
   if (value === undefined || value === null || value === '') return now;
   const m = typeof value === 'string' ? ISO_RE.exec(value.trim()) : null;
   if (!m) {
@@ -345,7 +344,7 @@ export function normalizeLab(input, { timeZone, now = new Date() }) {
   if (!isObject(input)) throw new ValidationError(['Lab result must be a JSON object']);
   const errors = [];
   const takenOn = typeof input.taken_on === 'string' ? input.taken_on.trim() : '';
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(takenOn) || Number.isNaN(Date.parse(`${takenOn}T00:00:00Z`))) {
+  if (!isIsoDate(takenOn)) {
     errors.push('taken_on must be a date like 2026-10-19');
   } else if (takenOn > localDate(now, timeZone)) {
     errors.push('taken_on is in the future');
