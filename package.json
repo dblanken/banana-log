@@ -1,0 +1,9 @@
+{
+  "name": "banana-log",
+  "private": true,
+  "type": "module",
+  "description": "Potassium and meal tracker on Cloudflare Workers + D1. No runtime dependencies.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

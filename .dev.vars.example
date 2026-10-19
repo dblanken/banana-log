@@ -1,0 +1,5 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars.
+GOOGLE_CLIENT_SECRET=from-google-cloud-console
+SESSION_SECRET=run-openssl-rand-base64-32
+ALLOWED_EMAILS=you@example.com,partner@example.com
+INGEST_TOKEN=run-openssl-rand-base64-32

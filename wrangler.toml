@@ -1,0 +1,27 @@
+name = "banana-log"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+# Preview URLs are extra public hostnames per version; this app doesn't need them.
+preview_urls = false
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+# Every request goes through the Worker first, so the app's pages stay behind sign-in.
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "banana-log"
+database_id = "52e30136-8518-4e2b-9dfe-59f37e054bf1"
+migrations_dir = "migrations"
+
+[vars]
+GOOGLE_CLIENT_ID = "392763238086-ngp223t2linhe94eef2nkc5rs9bvd0ru.apps.googleusercontent.com"
+
+# Secrets (set in the Cloudflare dashboard, never committed):
+#   GOOGLE_CLIENT_SECRET  Google OAuth client secret
+#   SESSION_SECRET        random value that signs login cookies
+#   ALLOWED_EMAILS        comma-separated Google addresses allowed to sign in
+#   INGEST_TOKEN          bearer token the custom GPT uses to log meals
