@@ -464,6 +464,18 @@ function mealSelect(id, value) {
       MEALS.map((m) => h('option', { value: m, selected: m === value }, cap(m)))));
 }
 
+// Watched allergens plus any already on the entry, so a wrong tag can be unticked.
+function allergenChoices(entry) {
+  const keys = [...new Set([...state.settings.allergens_watch, ...entry.allergens])];
+  if (!keys.length) return null;
+  return h('fieldset', { class: 'field' },
+    h('legend', { class: 'label' }, 'Contains'),
+    h('div', { class: 'radio-row' }, keys.map((key) => h('label', null,
+      h('input', { type: 'checkbox', name: 'ed-allergens', value: key, checked: entry.allergens.includes(key) }),
+      ALLERGENS[key] || key))),
+    h('span', { class: 'hint' }, 'Unticking only sticks if the description no longer names that food.'));
+}
+
 function openEditor(entry) {
   const dialog = document.getElementById('dialog');
   const errorBox = h('div');
@@ -480,6 +492,7 @@ function openEditor(entry) {
     h('div', { class: 'field' },
       h('label', { for: 'ed-notes' }, 'Notes'),
       h('textarea', { id: 'ed-notes', name: 'ed-notes', rows: '2', maxlength: '1000' }, entry.notes || '')),
+    allergenChoices(entry),
     errorBox,
     h('div', { class: 'actions' },
       h('button', { class: 'btn primary', type: 'submit' }, 'Save changes'),
@@ -496,6 +509,7 @@ function openEditor(entry) {
           eaten_at: form.elements['ed-when'].value,
           notes: form.elements['ed-notes'].value,
           totals: readNutrients(form, 'ed'),
+          allergens: [...form.querySelectorAll('input[name="ed-allergens"]:checked')].map((el) => el.value),
         },
       });
       dialog.close();
@@ -675,11 +689,16 @@ function renderAdd() {
     fill(pasteOut, results.map((r, i) => (r.ok
       ? mealCard(r.entry, { preview: save ? 'Saved' : 'Looks good', warnings: r.warnings })
       : h('article', { class: 'meal' }, h('p', { class: 'meal-desc' }, `Meal ${i + 1} wasn't saved`), errorList(r.err)))));
-    if (save && results.every((r) => r.ok)) {
-      state.pasteDraft = '';
-      pasteArea.value = '';
-      state.date = results[results.length - 1].entry.local_date;
-      toast(results.length === 1 ? 'Meal saved' : `${results.length} meals saved`);
+    if (save) {
+      // Leave only the meals that failed in the box, so fixing them and saving again can't duplicate the rest.
+      const failed = meals.filter((_, i) => !results[i].ok);
+      const saved = results.filter((r) => r.ok);
+      state.pasteDraft = failed.length ? JSON.stringify(failed.length === 1 ? failed[0] : failed, null, 2) : '';
+      pasteArea.value = state.pasteDraft;
+      if (saved.length) {
+        state.date = saved[saved.length - 1].entry.local_date;
+        toast(saved.length === 1 ? 'Meal saved' : `${saved.length} meals saved`);
+      }
     }
   }
 
@@ -810,7 +829,7 @@ async function renderLabs() {
       });
       return h('div', { class: 'lab' },
         h('span', { class: 'num' }, fmtDay(lab.taken_on, { month: 'short', day: 'numeric', year: 'numeric' })),
-        h('span', { class: 'val' }, `${lab.potassium_mmol.toFixed(1)}`),
+        h('span', { class: 'val' }, fmt(lab.potassium_mmol, 2).replace(/0$/, '')),
         h('span', { class: `pill ${cls === 'ok' ? 'good' : 'bad'}` }, label),
         h('span', { class: 'grow' }, lab.notes || ''),
         actions);

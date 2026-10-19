@@ -1,6 +1,6 @@
 // Turns untrusted input (from the AI, a paste, or a form) into clean records.
 import { zonedToUtc, localDate, localHour, isValidTimeZone } from './time.js';
-import { isIsoDate, round1 } from './util.js';
+import { isIsoDate, own, round1 } from './util.js';
 
 export const NUTRIENTS = {
   potassium_mg: 20000,
@@ -30,13 +30,13 @@ const GROUP_ALIASES = {
 // Common allergens the server can spot in food names itself, rather than trusting the AI to flag them.
 // Which ones to watch for is a setting (allergens_watch), stored in the database, not in code.
 export const ALLERGEN_PATTERNS = {
-  mushrooms: /mushroom|shiitake|portobell|cremini|crimini|chanterelle|morel|enoki|truffle/i,
+  mushrooms: /mushroom|shiitake|portobell|cremini|crimini|chanterelle|morel|enoki|(?<!chocolate )truffle(?! cake| candy| chocolate)/i,
   seafood: /seafood|shellfish|shrimp|prawn|crab|lobster|clam|oyster|mussel|scallop|squid|calamari|octopus|(?<!gold)fish|salmon|tuna|\bcod\b|tilapia|anchov|sardine|halibut|trout|mahi|sushi|sashimi|crawfish|crayfish|surimi|caviar|\broe\b/i,
   honey: /\bhoney\b/i,
   peanuts: /peanut/i,
   tree_nuts: /almond|cashew|walnut|pecan|pistachio|hazelnut|macadamia|brazil nut|pine nut/i,
   eggs: /\beggs?\b|omelet|frittata|quiche|mayonnaise|\bmayo\b|meringue/i,
-  dairy: /milk(?!shake)|cheese|yogurt|yoghurt|(?<!(?:peanut|almond|cashew|apple|cocoa|sunflower|nut) )butter(?!nut|milk)|cream|whey|kefir|milkshake/i,
+  dairy: /(?<!(?:almond|oat|soy|coconut|rice|cashew|hemp|pea|macadamia) )milk(?!shake)|cheese|yogurt|yoghurt|(?<!(?:peanut|almond|cashew|apple|cocoa|sunflower|nut) )butter(?!nut|milk)|cream|whey|kefir|milkshake/i,
   gluten: /wheat|bread|pasta|noodle|flour|barley|\brye\b|couscous|cracker|bagel|tortilla/i,
   soy: /\bsoy|tofu|edamame|tempeh|miso/i,
   sesame: /sesame|tahini/i,
@@ -94,7 +94,7 @@ function parseEatenAt(value, timeZone, now, errors) {
     return now;
   }
   const [, y, mo, d, h, mi, s = '00', off] = m;
-  if (+mo < 1 || +mo > 12 || +d < 1 || +d > 31 || +h > 23 || +mi > 59 || +s > 59) {
+  if (!isIsoDate(`${y}-${mo}-${d}`) || +h > 23 || +mi > 59 || +s > 59) {
     errors.push('eaten_at is not a real date and time');
     return now;
   }
@@ -137,7 +137,7 @@ function percentMap(value, field, keys, aliases, errors, warnings) {
   let sum = 0;
   for (const [rawKey, raw] of Object.entries(value)) {
     let key = rawKey.toLowerCase().trim().replace(/[\s/&-]+/g, '_');
-    key = aliases[key] || key;
+    key = own(aliases, key) || key;
     if (!keys.includes(key)) {
       warnings.push(`${field}.${rawKey} is not a known category and was ignored`);
       continue;
@@ -173,7 +173,7 @@ function normalizeItem(raw, i, errors) {
 
 export function detectAllergens(texts, watch) {
   const joined = texts.filter(Boolean).join(' \n ');
-  return watch.filter((name) => ALLERGEN_PATTERNS[name] && ALLERGEN_PATTERNS[name].test(joined));
+  return watch.filter((name) => own(ALLERGEN_PATTERNS, name)?.test(joined));
 }
 
 function normalizeAllergens(value, errors) {
@@ -186,7 +186,7 @@ function normalizeAllergens(value, errors) {
   for (const a of value.slice(0, 10)) {
     if (typeof a !== 'string' || !a.trim()) continue;
     const key = a.trim().toLowerCase().slice(0, 40);
-    out.push(ALLERGEN_ALIASES[key] || key);
+    out.push(own(ALLERGEN_ALIASES, key) || key);
   }
   return out;
 }
@@ -194,8 +194,9 @@ function normalizeAllergens(value, errors) {
 /**
  * Validate a meal entry. Returns { entry, warnings } or throws ValidationError.
  * Totals may be given directly, at the top level, or summed from items.
+ * checkItems: false skips the totals-vs-items warning (a person hand-correcting totals).
  */
-export function normalizeEntry(input, { timeZone, allergensWatch = [], now = new Date() }) {
+export function normalizeEntry(input, { timeZone, allergensWatch = [], checkItems = true, now = new Date() }) {
   if (!isObject(input)) throw new ValidationError(['The body must be a JSON object describing one meal']);
   const errors = [];
   const warnings = [];
@@ -220,7 +221,7 @@ export function normalizeEntry(input, { timeZone, allergensWatch = [], now = new
       totals[k] = given;
       // Only compare when every item has the value; partial item data is expected.
       const big = Math.max(given, summed ?? 0);
-      const comparable = summed !== null && values.length === items.length && (k === 'potassium_mg' || k === 'calories');
+      const comparable = checkItems && summed !== null && values.length === items.length && (k === 'potassium_mg' || k === 'calories');
       if (comparable && big > 0 && Math.abs(given - summed) / big > 0.15) {
         warnings.push(`totals.${k} (${given}) differs from the sum of the items (${summed})`);
       }
@@ -330,7 +331,7 @@ export function normalizeSettings(input, current = DEFAULT_SETTINGS) {
     else out[k] = round1(n);
   }
   if (input.allergens_watch !== undefined) {
-    if (Array.isArray(input.allergens_watch) && input.allergens_watch.every((a) => a in ALLERGEN_PATTERNS)) {
+    if (Array.isArray(input.allergens_watch) && input.allergens_watch.every((a) => Object.hasOwn(ALLERGEN_PATTERNS, a))) {
       out.allergens_watch = [...new Set(input.allergens_watch)];
     } else {
       errors.push(`allergens_watch must be a list drawn from: ${Object.keys(ALLERGEN_PATTERNS).join(', ')}`);

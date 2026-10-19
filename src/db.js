@@ -1,6 +1,7 @@
 // D1 queries. Every value goes through bind(); no SQL is built from input.
 import { DEFAULT_SETTINGS } from './validate.js';
 import { rowToEntry } from './summary.js';
+import { localDate } from './time.js';
 
 export async function loadSettings(db) {
   const { results } = await db.prepare('SELECT key, value FROM settings').all();
@@ -39,13 +40,30 @@ function entryValues(e) {
   ];
 }
 
-export async function insertEntry(db, entry, { source, createdBy }) {
+// With maxPerMinute, the insert only happens while fewer rows from this source were created in the
+// last minute. It's one statement, so simultaneous requests can't all slip past the check.
+// Returns null when the limit was hit.
+export async function insertEntry(db, entry, { source, createdBy, maxPerMinute = null }) {
   const columns = [...ENTRY_COLUMNS, 'source', 'created_by'];
+  const n = columns.length;
+  const limit = maxPerMinute === null ? '' : `WHERE (SELECT COUNT(*) FROM entries WHERE source = ?${n - 1}
+      AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 minute')) < ?${n + 1}`;
   const row = await db
-    .prepare(`INSERT INTO entries (${columns.join(', ')}) VALUES (${placeholders(columns.length)}) RETURNING *`)
-    .bind(...entryValues(entry), source, createdBy)
+    .prepare(`INSERT INTO entries (${columns.join(', ')}) SELECT ${placeholders(n)} ${limit} RETURNING *`)
+    .bind(...entryValues(entry), source, createdBy, ...(maxPerMinute === null ? [] : [maxPerMinute]))
     .first();
-  return rowToEntry(row);
+  return row ? rowToEntry(row) : null;
+}
+
+// local_date is stored for fast daily queries, so it must be rebuilt when the timezone changes.
+export async function rebucketDates(db, timeZone) {
+  const { results } = await db.prepare('SELECT id, eaten_at, local_date FROM entries').all();
+  const stmt = db.prepare('UPDATE entries SET local_date = ?1 WHERE id = ?2');
+  const updates = results
+    .map((r) => ({ id: r.id, date: localDate(new Date(r.eaten_at), timeZone), old: r.local_date }))
+    .filter((r) => r.date !== r.old)
+    .map((r) => stmt.bind(r.date, r.id));
+  for (let i = 0; i < updates.length; i += 100) await db.batch(updates.slice(i, i + 100));
 }
 
 export async function updateEntry(db, id, entry) {
@@ -80,14 +98,6 @@ export async function setDeleted(db, id, deleted) {
     .bind(id)
     .first();
   return row ? rowToEntry(row) : null;
-}
-
-export async function recentAiEntryCount(db) {
-  const row = await db
-    .prepare(`SELECT COUNT(*) AS n FROM entries WHERE source = 'ai'
-              AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 minute')`)
-    .first();
-  return row.n;
 }
 
 export async function listLabs(db) {

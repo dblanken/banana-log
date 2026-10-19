@@ -119,3 +119,31 @@ test('lab validation', () => {
   assert.throws(() => normalizeLab({ taken_on: '2026-10-01', potassium_mmol: 30 }, { timeZone: tz, now }), ValidationError);
   assert.throws(() => normalizeLab({ taken_on: '2026-11-01', potassium_mmol: 3.5 }, { timeZone: tz, now }), ValidationError);
 });
+
+test('rejects impossible calendar dates instead of rolling them over', async () => {
+  const { isIsoDate } = await import('../src/util.js');
+  assert.equal(isIsoDate('2026-02-28'), true);
+  assert.equal(isIsoDate('2026-02-30'), false);
+  assert.equal(isIsoDate('2026-02-31'), false);
+  assert.throws(() => normalizeEntry({ description: 'x', potassium_mg: 1, eaten_at: '2026-02-31T12:00' }, { timeZone: tz, now }), ValidationError);
+  assert.throws(() => normalizeLab({ taken_on: '2026-02-30', potassium_mmol: 3.5 }, { timeZone: tz, now }), ValidationError);
+});
+
+test('inherited object names are not valid keys', () => {
+  assert.throws(() => normalizeSettings({ allergens_watch: ['toString'] }), ValidationError);
+  assert.throws(() => normalizeSettings({ allergens_watch: ['constructor'] }), ValidationError);
+  const { entry } = normalizeEntry({ description: 'x', potassium_mg: 1, allergens: ['constructor'], plate_color: { constructor: 50, green: 50 } }, { timeZone: tz, now });
+  assert.deepEqual(entry.allergens, ['constructor']);
+  assert.deepEqual(entry.plate_color, { green: 50 });
+});
+
+test('plant milks and chocolate truffles are not flagged', () => {
+  assert.deepEqual(detectAllergens(['almond milk latte', 'coconut milk curry', 'chocolate truffle'], ['dairy', 'mushrooms']), []);
+  assert.deepEqual(detectAllergens(['whole milk'], ['dairy']), ['dairy']);
+  assert.deepEqual(detectAllergens(['truffle fries'], ['mushrooms']), ['mushrooms']);
+});
+
+test('checkItems: false skips the totals-vs-items warning', () => {
+  const input = { items: [{ name: 'a', potassium_mg: 100 }], totals: { potassium_mg: 500 } };
+  assert.deepEqual(normalizeEntry(input, { timeZone: tz, now, checkItems: false }).warnings, []);
+});

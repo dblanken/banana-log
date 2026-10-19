@@ -96,8 +96,16 @@ export function withSecurityHeaders(res, { noStore = false } = {}) {
   return out;
 }
 
+// Real calendar dates only: Date.parse accepts 2026-02-31, so round-trip to catch rollover.
 export function isIsoDate(s) {
-  return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`));
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
+// Lookup that ignores inherited names like "constructor", for maps keyed by user input.
+export function own(map, key) {
+  return Object.hasOwn(map, key) ? map[key] : undefined;
 }
 
 export function addDays(isoDate, n) {

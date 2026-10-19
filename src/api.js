@@ -2,7 +2,7 @@
 // Cross-site writes are rejected in index.js before either handler runs.
 import {
   deleteLab, getEntry, insertEntry, insertLab, listEntries, listLabs, loadSettings,
-  recentAiEntryCount, saveSettings, setDeleted, updateEntry,
+  rebucketDates, saveSettings, setDeleted, updateEntry,
 } from './db.js';
 import { openApiSpec } from './openapi.js';
 import { MG_PER_MEQ_POTASSIUM, aggregate, daySummary, potassiumStatus } from './summary.js';
@@ -96,12 +96,10 @@ export const handleIngest = wrap(async (request, env, url) => {
   }
 
   if (url.pathname === '/api/ingest/entries' && request.method === 'POST') {
-    const [settings, recent] = await Promise.all([loadSettings(env.DB), recentAiEntryCount(env.DB)]);
-    if (recent >= AI_ENTRIES_PER_MINUTE) {
-      return json({ error: 'Too many entries in the last minute. Try again shortly.' }, 429);
-    }
+    const settings = await loadSettings(env.DB);
     const { entry, warnings } = normalizeEntry(await readJson(request), entryOptions(settings));
-    const saved = await insertEntry(env.DB, entry, { source: 'ai', createdBy: 'ai' });
+    const saved = await insertEntry(env.DB, entry, { source: 'ai', createdBy: 'ai', maxPerMinute: AI_ENTRIES_PER_MINUTE });
+    if (!saved) return json({ error: 'Too many entries in the last minute. Try again shortly.' }, 429);
     return json({ entry: saved, warnings, today: await summaryFor(env, saved.local_date, settings) }, 201);
   }
 
@@ -129,8 +127,10 @@ export const handleApi = wrap(async (request, env, url, session) => {
   if (path === '/api/settings') {
     if (method === 'GET') return json(await settings());
     if (method === 'PUT') {
-      const next = normalizeSettings(await readJson(request), await settings());
+      const current = await settings();
+      const next = normalizeSettings(await readJson(request), current);
       await saveSettings(env.DB, next);
+      if (next.timezone !== current.timezone) await rebucketDates(env.DB, next.timezone);
       return json(next);
     }
   }
@@ -177,7 +177,9 @@ export const handleApi = wrap(async (request, env, url, session) => {
       const merged = { ...existing, totals: { ...existing.totals } };
       for (const k of EDITABLE) if (patch[k] !== undefined) merged[k] = patch[k];
       for (const k of Object.keys(NUTRIENTS)) if (patch.totals?.[k] !== undefined) merged.totals[k] = patch.totals[k];
-      const { entry, warnings } = normalizeEntry(merged, entryOptions(await settings()));
+      // Hand-edited totals are the correction, so don't warn that they disagree with the AI's items.
+      const options = { ...entryOptions(await settings()), checkItems: patch.totals === undefined };
+      const { entry, warnings } = normalizeEntry(merged, options);
       const saved = await updateEntry(env.DB, id, entry);
       if (!saved) throw new HttpError(404, 'Entry not found');
       return json({ entry: saved, warnings });

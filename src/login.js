@@ -1,5 +1,6 @@
 // The only page anyone sees before signing in. No data, no script.
 import { authConfigured } from './auth.js';
+import { own } from './util.js';
 
 const MESSAGES = {
   not_allowed: "That Google account isn't on the list for Banana Log.",
@@ -15,7 +16,7 @@ const escape = (s) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 export function loginPage(url, env) {
   const configured = authConfigured(env);
   const code = configured ? url.searchParams.get('error') : 'not_configured';
-  const message = MESSAGES[code] || (url.searchParams.get('signed_out') ? 'You are signed out.' : '');
+  const message = own(MESSAGES, code) || (url.searchParams.get('signed_out') ? 'You are signed out.' : '');
   const html = `<!doctype html>
 <html lang="en">
 <head>
